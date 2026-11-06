@@ -1,0 +1,1240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screenshot OCR</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<style>
+  :root {
+    --bg: #191919;
+    --panel: #212121;
+    --panel-2: #2a2a2a;
+    --border: #303030;
+    --text: #e6e6e6;
+    --muted: #8a8a8a;
+    --accent: #4f8cff;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --canvas-bg: #121212;
+    --title-h: 22px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 12px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    user-select: none;
+  }
+
+  /* ---- title bar (drag region) ---- */
+  .titlebar {
+    height: var(--title-h); flex: none;
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 4px 0 8px;
+    -webkit-app-region: drag;
+  }
+  .titlebar .name { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+  .titlebar .spacer { flex: 1; }
+  .titlebar button { -webkit-app-region: no-drag; }
+  .tb {
+    font: inherit; font-size: 11px; color: var(--muted);
+    background: transparent; border: 0; border-radius: 4px;
+    height: 18px; padding: 0 6px; cursor: pointer;
+  }
+  .tb:hover { background: var(--panel-2); color: var(--text); }
+  .tb.on { color: var(--accent); }
+  .tb.close:hover { background: #c42b1c; color: #fff; }
+  .winctl { display: none; }
+  body.electron .winctl { display: inline-block; }
+
+  /* ---- 4 columns ---- */
+  main {
+    flex: 1; min-height: 0;
+    display: grid; /* columns set from JS: card | gutter | card | gutter | ... */
+    grid-template-columns: minmax(0, 1.4fr) 6px minmax(0, 1fr) 6px minmax(0, 1fr) 6px minmax(0, 1fr);
+    padding: 0 6px 6px;
+  }
+  /* Draggable space between sections: drag to resize the neighbours, double-click to reset */
+  .gutter { position: relative; cursor: col-resize; touch-action: none; }
+  .gutter::before { content: ''; position: absolute; inset: 0 -4px; } /* wider grab area */
+  .gutter::after {
+    content: ''; position: absolute; top: 8px; bottom: 8px; left: 50%; width: 2px; margin-left: -1px;
+    border-radius: 1px; background: transparent; transition: background .1s;
+  }
+  .gutter:hover::after, .gutter.dragging::after { background: var(--accent); }
+  body.resizing, body.resizing * { cursor: col-resize !important; }
+  .card {
+    min-width: 0; min-height: 0;
+    display: flex; flex-direction: column; gap: 4px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px; outline: none;
+  }
+  .card.active { border-color: var(--accent); }
+  .card.moving { opacity: .6; border-style: dashed; }
+  body.reordering, body.reordering * { cursor: grabbing !important; }
+
+  .viewport {
+    position: relative; flex: 1; min-height: 0;
+    background: var(--canvas-bg); border-radius: 4px; overflow: hidden;
+    cursor: grab; touch-action: none;
+  }
+  .viewport.dragging { cursor: grabbing; }
+  .viewport.dropping { outline: 1px dashed var(--accent); outline-offset: -3px; }
+  .viewport canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 11px; pointer-events: none; text-align: center; padding: 18px 6px 0;
+  }
+  .topbar {
+    position: absolute; left: 3px; right: 3px; top: 3px; z-index: 2;
+    display: flex; align-items: center; gap: 4px; pointer-events: none;
+  }
+  .label {
+    flex: none;
+    background: rgba(25,25,25,.85); color: var(--text);
+    font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 3px; pointer-events: auto; cursor: grab;
+  }
+  .label:hover { background: var(--panel-2); }
+  /* Rotation slider: hidden until the pointer is over its strip */
+  .tools {
+    flex: 1; min-width: 0; justify-content: flex-end; pointer-events: auto;
+    display: flex; align-items: center; height: 20px;
+    background: rgba(25,25,25,.85); border-radius: 4px; padding: 0 6px;
+    opacity: 0; transition: opacity 60ms linear;
+  }
+  .tools:hover, .tools:active { opacity: 1; }
+  .tools input.rot {
+    flex: 1; min-width: 40px; max-width: 160px; height: 14px; margin: 0; cursor: pointer;
+    -webkit-appearance: none; appearance: none; background: transparent;
+  }
+  .tools input.rot::-webkit-slider-runnable-track {
+    height: 3px; border-radius: 2px;
+    background: linear-gradient(to right, var(--border) calc(50% - 1px), var(--muted) calc(50% - 1px), var(--muted) calc(50% + 1px), var(--border) calc(50% + 1px));
+  }
+  .tools input.rot::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent); margin-top: -3.5px; border: 0;
+  }
+  .info {
+    position: absolute; left: 3px; bottom: 3px; z-index: 2;
+    font-size: 10px; color: var(--muted); background: rgba(25,25,25,.85);
+    padding: 0 4px; border-radius: 3px; pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .info:empty { display: none; }
+
+  .result { display: flex; gap: 3px; flex: none; }
+  .result input {
+    flex: 1; min-width: 0; height: 24px;
+    font: 600 13px/1 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .03em;
+    padding: 0 6px; border-radius: 4px;
+    border: 1px solid var(--border); border-left: 3px solid var(--border);
+    background: var(--panel-2); color: var(--text); user-select: text;
+  }
+  .result input:focus { outline: none; border-color: var(--accent); }
+  .result input.ok { border-left-color: var(--ok); }
+  .result input.warn { border-left-color: var(--warn); }
+  .result input.err { border-left-color: var(--err); }
+  .result button {
+    font: inherit; font-size: 11px; color: var(--muted);
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    height: 24px; padding: 0 6px; cursor: pointer;
+  }
+  .result button:hover { color: var(--text); border-color: var(--muted); }
+  .result button.ocr { color: var(--accent); font-weight: 700; }
+  .result button.ocr:hover { border-color: var(--accent); }
+  .result button:disabled { opacity: .45; cursor: default; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 4px 10px; border-radius: 5px;
+    font-size: 11px; opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 10;
+    white-space: nowrap;
+  }
+  .toast.show { opacity: 1; }
+
+  /* ---- job tabs (in the title bar) ---- */
+  .tabs {
+    display: flex; align-items: center; gap: 2px; min-width: 0; max-width: 560px;
+    overflow-x: auto; scrollbar-width: none; -webkit-app-region: no-drag;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: none; display: inline-flex; align-items: center; gap: 4px;
+    height: 18px; max-width: 160px; padding: 0 4px 0 8px; border-radius: 4px;
+    color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap;
+  }
+  .tab:hover { background: var(--panel-2); color: var(--text); }
+  .tab.active { background: var(--panel-2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+  .tab .t { overflow: hidden; text-overflow: ellipsis; }
+  .tab .x {
+    width: 14px; height: 14px; line-height: 14px; text-align: center; border-radius: 3px;
+    font-size: 10px; opacity: 0;
+  }
+  .tab:hover .x, .tab.active .x { opacity: .7; }
+  .tab .x:hover { opacity: 1; background: var(--border); }
+  .tb.plus { font-size: 14px; font-weight: 600; padding: 0 6px; -webkit-app-region: no-drag; }
+
+  /* ---- "new job" dialog ---- */
+  .modal {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    align-items: center; justify-content: center; background: rgba(0,0,0,.55);
+  }
+  .modal.open { display: flex; }
+  .modal form {
+    width: min(620px, calc(100% - 24px)); display: flex; flex-direction: column; gap: 6px;
+    background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px;
+    -webkit-app-region: no-drag;
+  }
+  .modal .row { display: flex; align-items: center; gap: 6px; }
+  .modal label { color: var(--muted); font-size: 11px; flex: none; width: 52px; }
+  .modal input {
+    flex: 1; min-width: 0; height: 24px; padding: 0 8px; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    font: inherit; font-size: 13px; user-select: text;
+  }
+  .modal input:focus { outline: none; border-color: var(--accent); }
+  .modal .path {
+    flex: 1; min-width: 0; color: var(--text); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  }
+  .modal .path.missing { color: var(--warn); direction: ltr; }
+  .modal button {
+    font: inherit; font-size: 11px; height: 24px; padding: 0 10px; border-radius: 4px; cursor: pointer;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  }
+  .modal button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 700; }
+  .modal button:disabled { opacity: .45; cursor: default; }
+</style>
+</head>
+<body>
+<div class="titlebar">
+  <div class="tabs" id="tabs"></div>
+  <button class="tb plus" id="newTab" title="New job (Ctrl+Q)">+</button>
+  <span class="spacer"></span>
+  <button class="tb" id="openFolder" title="Open this job's folder">Folder</button>
+  <button class="tb on" id="autoOcr" title="Run OCR automatically when an image is pasted">Auto OCR</button>
+  <button class="tb" id="copyAll" title="Copy all four values">Copy all</button>
+  <button class="tb" id="clearAll" title="Clear all sections">Clear all</button>
+  <button class="tb" id="help" title="Click a section, Ctrl+V to paste · Drag = pan · Wheel = zoom · Shift+wheel = fine rotate · R / Shift+R = rotate 90° · +/- zoom · 0 fit · Enter OCR · 1-4 select section">?</button>
+  <button class="tb winctl" id="pin" title="Always on top">Pin</button>
+  <button class="tb winctl" id="min" title="Minimize">&#8212;</button>
+  <button class="tb winctl close" id="close" title="Close">&#10005;</button>
+</div>
+
+<main id="grid"></main>
+<div class="toast" id="toast"></div>
+
+<div class="modal" id="jobModal">
+  <form id="jobForm" autocomplete="off">
+    <div class="row">
+      <label for="jobName">New job</label>
+      <input id="jobName" placeholder="Name (e.g. customer or stock #)" maxlength="100" spellcheck="false">
+      <button type="submit" class="primary" id="jobCreate">Create</button>
+      <button type="button" id="jobCancel">Cancel</button>
+    </div>
+    <div class="row">
+      <label>Saves to</label>
+      <span class="path" id="jobPath"></span>
+      <button type="button" id="jobPick">Change folder…</button>
+    </div>
+  </form>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- Field definitions ----------
+  const FIELDS = [
+    { key: 'vin',    title: 'VIN',           placeholder: '17-character VIN', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:# ', parse: parseVIN },
+    { key: 'plate',  title: 'Plate', placeholder: 'Plate number',     whitelist: '', engine: 'plate', parse: parsePlate },
+    { key: 'exp',    title: 'Expiration',    placeholder: 'MM/DD/YYYY',       whitelist: '', parse: parseExpiration },
+    { key: 'miles',  title: 'Mileage',       placeholder: 'Odometer reading', whitelist: '', parse: parseMileage },
+  ];
+
+  // ---------- Parsers ----------
+  const VIN_MAP = { A:1,B:2,C:3,D:4,E:5,F:6,G:7,H:8,J:1,K:2,L:3,M:4,N:5,P:7,R:9,S:2,T:3,U:4,V:5,W:6,X:7,Y:8,Z:9 };
+  const VIN_W = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2];
+  function vinCheckOk(v) {
+    let sum = 0;
+    for (let i = 0; i < 17; i++) {
+      const c = v[i];
+      const n = /\d/.test(c) ? +c : VIN_MAP[c];
+      if (n === undefined) return false;
+      sum += n * VIN_W[i];
+    }
+    const r = sum % 11;
+    return v[8] === (r === 10 ? 'X' : String(r));
+  }
+  function parseVIN(text) {
+    const lines = text.toUpperCase().split(/\n+/);
+    const sources = [];
+    for (const line of lines) {
+      // exact tokens first, then the whole line with separators removed
+      for (const tok of line.split(/[^A-Z0-9]+/)) if (tok.length >= 17) sources.push(tok);
+      sources.push(line.replace(/[^A-Z0-9]/g, ''));
+    }
+    let firstCandidate = null;
+    for (const src of sources) {
+      const n = src.replace(/[IO]/g, m => (m === 'I' ? '1' : '0')).replace(/Q/g, '0');
+      for (let i = 0; i + 17 <= n.length; i++) {
+        const w = n.slice(i, i + 17);
+        if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(w)) continue;
+        if (vinCheckOk(w)) return { value: w, status: 'Check digit valid', level: 'ok' };
+        if (!firstCandidate) firstCandidate = w;
+      }
+    }
+    if (firstCandidate) {
+      const fixed = vinFixOneChar(firstCandidate);
+      if (fixed) return { value: fixed.vin, status: `Fixed 1 character with the check digit (${fixed.from}→${fixed.to}) — verify`, level: 'warn' };
+      return { value: firstCandidate, status: 'Check digit mismatch — verify', level: 'warn' };
+    }
+    return { value: '', status: 'No 17-char VIN found', level: 'err' };
+  }
+  // Characters OCR commonly mixes up. If exactly one single swap makes the check digit valid, use it.
+  const VIN_CONFUSE = { 0: 'D', D: '0', 8: 'B3', B: '8', 3: '8', 5: 'S', S: '5', 2: 'Z', Z: '2', 6: 'G', G: '6', 1: '7', 7: '1', 4: 'A', A: '4', U: 'V', V: 'U', M: 'N', N: 'M' };
+  function vinFixOneChar(v) {
+    const hits = [];
+    for (let i = 0; i < 17; i++) for (const alt of VIN_CONFUSE[v[i]] || '') {
+      const t = v.slice(0, i) + alt + v.slice(i + 1);
+      if (vinCheckOk(t)) hits.push({ vin: t, from: v[i], to: alt });
+    }
+    return hits.length === 1 ? hits[0] : null;
+  }
+
+  const PLATE_STOP = /\b(LICEN[CS]E|PLATE|PLATES|STATE|TAG|NO|NUMBER|NUM|REG|REGISTRATION|VEHICLE|LIC)\b/g;
+  function parsePlate(text) {
+    const lines = text.toUpperCase().replace(PLATE_STOP, ' ').split(/\n+/);
+    let best = null;
+    const consider = (raw) => {
+      const v = raw.replace(/[^A-Z0-9]/g, '');
+      if (v.length < 2 || v.length > 8) return;
+      let score = 0;
+      if (/[A-Z]/.test(v) && /\d/.test(v)) score += 3;
+      if (v.length >= 5 && v.length <= 7) score += 2;
+      if (/^[A-Z]+$/.test(v) && v.length > 4) score -= 2; // probably a word
+      if (!best || score > best.score) best = { v, score };
+    };
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      consider(t);                              // whole line (handles "ABC 1234")
+      for (const tok of t.split(/\s+/)) consider(tok);
+    }
+    if (!best) return { value: '', status: 'No plate found', level: 'err' };
+    return { value: best.v, status: best.score >= 3 ? 'Detected' : 'Low confidence — verify', level: best.score >= 3 ? 'ok' : 'warn' };
+  }
+
+  const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const pad = n => String(n).padStart(2, '0');
+  const fullYear = y => (y < 100 ? 2000 + y : y);
+  function parseExpiration(text) {
+    const t = text.toUpperCase().replace(/[Oo](?=\d)|(?<=\d)[Oo]/g, '0');
+    const found = [];
+    const push = (idx, y, m, d) => {
+      y = fullYear(y);
+      if (m < 1 || m > 12 || y < 1990 || y > 2100) return;
+      if (d && (d < 1 || d > 31)) return;
+      found.push({ idx, y, m, d, sort: y * 10000 + m * 100 + (d || 0),
+        label: d ? `${pad(m)}/${pad(d)}/${y}` : `${pad(m)}/${y}` });
+    };
+    let r;
+    const ymd = /\b(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/g;
+    while ((r = ymd.exec(t))) push(r.index, +r[1], +r[2], +r[3]);
+    const mdy = /\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})\b/g;
+    while ((r = mdy.exec(t))) push(r.index, +r[3], +r[1], +r[2]);
+    const mon = /\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*\.?\s*(\d{1,2})?(?:ST|ND|RD|TH)?,?\s+(\d{4})\b/g;
+    while ((r = mon.exec(t))) push(r.index, +r[3], MONTHS.indexOf(r[1].slice(0, 3)) + 1, r[2] ? +r[2] : 0);
+    const dmon = /\b(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?,?\s+(\d{4})\b/g;
+    while ((r = dmon.exec(t))) push(r.index, +r[3], MONTHS.indexOf(r[2]) + 1, +r[1]);
+    if (!found.length) {
+      const my = /\b(\d{1,2})[\/\-](\d{4}|\d{2})\b/g;
+      while ((r = my.exec(t))) push(r.index, +r[2], +r[1], 0);
+    }
+    if (!found.length) return { value: '', status: 'No date found', level: 'err' };
+
+    const expIdx = t.search(/EXP|EXPIRES|EXPIRATION|VALID\s+(THRU|THROUGH|UNTIL)/);
+    let pick;
+    if (expIdx >= 0) pick = found.filter(f => f.idx >= expIdx).sort((a, b) => a.idx - b.idx)[0];
+    if (!pick) pick = found.sort((a, b) => b.sort - a.sort)[0]; // latest date
+
+    const now = new Date();
+    const end = new Date(pick.y, pick.m - 1, pick.d || new Date(pick.y, pick.m, 0).getDate(), 23, 59, 59);
+    const days = Math.ceil((end - now) / 86400000);
+    if (days < 0) return { value: pick.label, status: `Expired ${-days} day${days === -1 ? '' : 's'} ago`, level: 'err' };
+    if (days <= 30) return { value: pick.label, status: `Expires in ${days} day${days === 1 ? '' : 's'}`, level: 'warn' };
+    return { value: pick.label, status: 'Valid', level: 'ok' };
+  }
+
+  function parseMileage(text) {
+    const t = text.toUpperCase().replace(/(?<=\d)[O]|[O](?=\d)/g, '0');
+    const nums = [];
+    const re = /\d{1,3}(?:[,.]\d{3})+|\d+/g;
+    let r;
+    while ((r = re.exec(t))) {
+      const digits = r[0].replace(/[,.]/g, '');
+      if (digits.length > 7) continue;
+      const after = t.slice(r.index + r[0].length, r.index + r[0].length + 8);
+      const before = t.slice(Math.max(0, r.index - 14), r.index);
+      // "mi" is often read as "ml" / "m1" / "mI" on dashboards
+      const unit = /^\s*(MILES?|MI|ML|M1|MLS|KMS?)\b/.test(after) || /(ODO|ODOMETER|MILEAGE|MILES|TOTAL)\W*$/.test(before);
+      nums.push({ n: +digits, unit });
+    }
+    if (!nums.length) return { value: '', status: 'No number found', level: 'err' };
+    const withUnit = nums.filter(x => x.unit);
+    const pick = (withUnit.length ? withUnit : nums).sort((a, b) => b.n - a.n)[0];
+    return { value: pick.n.toLocaleString('en-US'), status: withUnit.length ? 'Detected' : 'Largest number — verify', level: withUnit.length ? 'ok' : 'warn' };
+  }
+
+  // ---------- OCR worker (shared, serialized) ----------
+  let workerPromise = null;
+  let queue = Promise.resolve();
+  let progressCb = null;
+  function getWorker() {
+    if (!workerPromise) {
+      workerPromise = Tesseract.createWorker('eng', 1, {
+        logger: m => { if (progressCb) progressCb(m); },
+      });
+    }
+    return workerPromise;
+  }
+  function recognize(canvas, whitelist, onProgress) {
+    const job = queue.then(async () => {
+      const w = await getWorker();
+      progressCb = onProgress;
+      await w.setParameters({ tessedit_char_whitelist: whitelist || '', preserve_interword_spaces: '1' });
+      const { data } = await w.recognize(canvas);
+      progressCb = null;
+      return data.text || '';
+    });
+    queue = job.catch(() => {});
+    return job;
+  }
+
+  // ---------- Section (canvas viewer) ----------
+  const grid = document.getElementById('grid');
+  const sections = [];
+  let active = null;
+  let autoOcr = true;
+  let currentTab = null; // the job tab whose content is showing
+
+  class Section {
+    constructor(field, index) {
+      this.field = field;
+      this.index = index;
+      this.img = null;
+      this.rot = 0;
+      this.zoom = 1;
+      this.panX = 0;
+      this.panY = 0;
+      this.rawText = '';
+      this.build();
+    }
+
+    build() {
+      const f = this.field;
+      const el = document.createElement('section');
+      el.className = 'card';
+      el.tabIndex = 0;
+      el.innerHTML = `
+        <div class="viewport">
+          <canvas></canvas>
+          <div class="topbar">
+          <div class="label" title="Drag to move this section">${f.title}</div>
+          <div class="tools">
+            <input type="range" class="rot" min="-180" max="180" step="0.5" value="0" title="Rotate left / right (A / D) · double-click to reset">
+          </div>
+          </div>
+          <div class="empty">Ctrl+V to paste</div>
+          <div class="info"></div>
+          <input type="file" accept="image/*" hidden>
+        </div>
+        <div class="result">
+          <input type="text" spellcheck="false" placeholder="${f.placeholder}">
+          <button data-act="copy" title="Copy value (Ctrl+C)">Copy</button>
+          <button data-act="ocr" class="ocr" title="OCR visible area (Enter)">OCR</button>
+        </div>`;
+      grid.appendChild(el);
+
+      this.el = el;
+      this.vp = el.querySelector('.viewport');
+      this.canvas = el.querySelector('canvas');
+      this.ctx = this.canvas.getContext('2d');
+      this.emptyEl = el.querySelector('.empty');
+      this.infoEl = el.querySelector('.info');
+      this.input = el.querySelector('.result input');
+      this.fileInput = el.querySelector('input[type=file]');
+      this.ocrBtn = el.querySelector('[data-act=ocr]');
+
+      el.addEventListener('pointerdown', () => setActive(this), true);
+      el.addEventListener('focusin', () => setActive(this));
+
+      const tools = el.querySelector('.tools');
+      tools.addEventListener('pointerdown', e => e.stopPropagation());
+      tools.addEventListener('dblclick', e => e.stopPropagation());
+      this.ocrBtn.addEventListener('click', () => this.runOcr());
+      this.input.addEventListener('input', () => scheduleSave());
+      this.slider = el.querySelector('input.rot');
+      this.slider.addEventListener('input', () => this.setRotation(+this.slider.value));
+      this.slider.addEventListener('dblclick', () => this.setRotation(0));
+      el.querySelector('[data-act=copy]').addEventListener('click', () => copyText(this.input.value, `${f.title} copied`));
+
+      this.fileInput.addEventListener('change', () => {
+        const file = this.fileInput.files[0];
+        if (file) this.loadBlob(file);
+        this.fileInput.value = '';
+      });
+
+      // Drag & drop
+      this.vp.addEventListener('dragover', e => { e.preventDefault(); this.vp.classList.add('dropping'); });
+      this.vp.addEventListener('dragleave', () => this.vp.classList.remove('dropping'));
+      this.vp.addEventListener('drop', e => {
+        e.preventDefault();
+        this.vp.classList.remove('dropping');
+        const file = [...e.dataTransfer.files].find(x => x.type.startsWith('image/'));
+        if (file) this.loadBlob(file);
+      });
+
+      // Pan
+      let drag = null;
+      this.vp.addEventListener('pointerdown', e => {
+        if (!this.img || e.button !== 0) return;
+        drag = { x: e.clientX, y: e.clientY, px: this.panX, py: this.panY, id: e.pointerId };
+        this.vp.setPointerCapture(e.pointerId);
+        this.vp.classList.add('dragging');
+      });
+      this.vp.addEventListener('pointermove', e => {
+        if (!drag || e.pointerId !== drag.id) return;
+        this.panX = drag.px + (e.clientX - drag.x);
+        this.panY = drag.py + (e.clientY - drag.y);
+        this.draw();
+      });
+      const endDrag = () => { drag = null; this.vp.classList.remove('dragging'); };
+      this.vp.addEventListener('pointerup', endDrag);
+      this.vp.addEventListener('pointercancel', endDrag);
+      this.vp.addEventListener('dblclick', () => { if (this.img) this.fit(); else this.fileInput.click(); });
+
+      // Wheel: zoom around cursor; Shift+wheel: fine rotate
+      this.vp.addEventListener('wheel', e => {
+        if (!this.img) return;
+        e.preventDefault();
+        if (e.shiftKey) {
+          const d = e.deltaY || e.deltaX;
+          this.rotateBy(d > 0 ? 1 : -1);
+          return;
+        }
+        const rect = this.vp.getBoundingClientRect();
+        this.zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - rect.left, e.clientY - rect.top);
+      }, { passive: false });
+
+      new ResizeObserver(() => this.draw()).observe(this.vp);
+    }
+
+    action(act) {
+      switch (act) {
+        case 'rotL': this.rotateBy(-90); break;
+        case 'rotR': this.rotateBy(90); break;
+        case 'zoomIn': this.zoomAt(1.25); break;
+        case 'zoomOut': this.zoomAt(0.8); break;
+        case 'fit': this.fit(); break;
+        case 'clear': this.clear(); break;
+        case 'ocr': this.runOcr(); break;
+      }
+    }
+
+    // A screenshot pasted / dropped / picked by the user: show it, save it to the job folder, OCR it
+    async loadBlob(blob) {
+      const tab = currentTab;
+      let img;
+      try { img = await blobToImage(blob); } catch { toast('Could not read that image'); return; }
+      if (tab !== currentTab) return; // switched tabs while decoding
+      this.img = img;
+      this.rot = 0;
+      this.slider.value = 0;
+      this.emptyEl.style.display = 'none';
+      this.fit();
+      this.setStatus('', '');
+      saveImageToJob(tab, this.field, blob);
+      if (autoOcr) this.runOcr();
+    }
+
+    clear() {
+      this.img = null;
+      this.rot = 0; this.zoom = 1; this.panX = 0; this.panY = 0;
+      this.slider.value = 0;
+      this.emptyEl.style.display = '';
+      this.input.value = '';
+      this.rawText = '';
+      this.setStatus('', '');
+      this.draw();
+      scheduleSave();
+    }
+
+    // Everything a tab needs to remember about this section
+    getState() {
+      return {
+        img: this.img, rot: this.rot, zoom: this.zoom, panX: this.panX, panY: this.panY,
+        value: this.input.value, statusText: this.statusText || '', level: this.level || '', rawText: this.rawText,
+      };
+    }
+
+    setState(st) {
+      st = st || {};
+      this.img = st.img || null;
+      this.rot = st.rot || 0;
+      this.slider.value = this.rot;
+      this.panX = st.panX || 0; this.panY = st.panY || 0;
+      this.zoom = st.zoom || 1;
+      this.emptyEl.style.display = this.img ? 'none' : '';
+      this.input.value = st.value || '';
+      this.rawText = st.rawText || '';
+      this.setStatus(st.statusText || '', st.level || '');
+      if (this.img && !st.zoom) this.fit(); else this.draw();
+    }
+
+    rotateBy(deg) { this.setRotation(this.rot + deg); }
+
+    setRotation(r) {
+      while (r > 180) r -= 360;
+      while (r < -180) r += 360;
+      r = Math.round(r * 10) / 10; // avoid float noise like 3.9999999 from repeated small steps
+      this.rot = r;
+      this.slider.value = r;
+      this.draw();
+      this.flashInfo(`${r}°`);
+      scheduleSave();
+    }
+
+    zoomAt(factor, cx, cy) {
+      if (!this.img) return;
+      const w = this.vp.clientWidth, h = this.vp.clientHeight;
+      if (cx === undefined) { cx = w / 2; cy = h / 2; }
+      const nz = Math.min(40, Math.max(0.02, this.zoom * factor));
+      const k = nz / this.zoom;
+      const px = cx - w / 2, py = cy - h / 2;
+      this.panX = px - (px - this.panX) * k;
+      this.panY = py - (py - this.panY) * k;
+      this.zoom = nz;
+      this.draw();
+      this.flashInfo(`${Math.round(nz * 100)}%`);
+    }
+
+    fit() {
+      if (!this.img) return;
+      const w = this.vp.clientWidth, h = this.vp.clientHeight;
+      const a = this.rot * Math.PI / 180;
+      const iw = this.img.naturalWidth, ih = this.img.naturalHeight;
+      const bw = Math.abs(iw * Math.cos(a)) + Math.abs(ih * Math.sin(a));
+      const bh = Math.abs(iw * Math.sin(a)) + Math.abs(ih * Math.cos(a));
+      this.zoom = Math.min((w - 4) / bw, (h - 4) / bh);
+      this.panX = 0; this.panY = 0;
+      this.draw();
+    }
+
+    flashInfo(text) {
+      if (this.busy) return;
+      this.infoEl.textContent = text;
+      clearTimeout(this.infoTimer);
+      this.infoTimer = setTimeout(() => { if (!this.busy) this.infoEl.textContent = ''; }, 900);
+    }
+
+    paint(ctx, w, h, scale, bg, ox = 0, oy = 0) {
+      const cv = ctx.canvas;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, cv.width, cv.height); } else ctx.clearRect(0, 0, cv.width, cv.height);
+      if (!this.img) return;
+      ctx.setTransform(scale, 0, 0, scale, -ox * scale, -oy * scale);
+      ctx.translate(w / 2 + this.panX, h / 2 + this.panY);
+      ctx.rotate(this.rot * Math.PI / 180);
+      ctx.scale(this.zoom, this.zoom);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(this.img, -this.img.naturalWidth / 2, -this.img.naturalHeight / 2);
+    }
+
+    draw() {
+      const w = this.vp.clientWidth, h = this.vp.clientHeight;
+      const dpr = window.devicePixelRatio || 1;
+      if (this.canvas.width !== Math.round(w * dpr) || this.canvas.height !== Math.round(h * dpr)) {
+        this.canvas.width = Math.round(w * dpr);
+        this.canvas.height = Math.round(h * dpr);
+      }
+      this.paint(this.ctx, w, h, dpr, null);
+    }
+
+    // Render the visible region at (at least) native resolution, grayscale, dark backgrounds inverted
+    snapshot() {
+      const w = this.vp.clientWidth, h = this.vp.clientHeight;
+      let scale = Math.max(3, 1 / this.zoom);
+      scale = Math.min(scale, 4000 / Math.max(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.round(w * scale);
+      c.height = Math.round(h * scale);
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      this.paint(ctx, w, h, scale, '#ffffff');
+
+      const id = ctx.getImageData(0, 0, c.width, c.height);
+      const d = id.data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        d[i] = d[i + 1] = d[i + 2] = g;
+        sum += g;
+      }
+      if (sum / (d.length / 4) < 110) for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = 255 - d[i];
+      ctx.putImageData(id, 0, 0);
+      return c;
+    }
+
+    // Part of the image that is visible in the view (viewport coords), so empty margins aren't sent
+    visibleImageRect() {
+      const w = this.vp.clientWidth, h = this.vp.clientHeight;
+      const a = this.rot * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
+      const hw = this.img.naturalWidth / 2 * this.zoom, hh = this.img.naturalHeight / 2 * this.zoom;
+      const cx = w / 2 + this.panX, cy = h / 2 + this.panY;
+      const pts = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => [cx + x * cos - y * sin, cy + x * sin + y * cos]);
+      const x0 = Math.max(0, Math.min(...pts.map(p => p[0]))), x1 = Math.min(w, Math.max(...pts.map(p => p[0])));
+      const y0 = Math.max(0, Math.min(...pts.map(p => p[1]))), y1 = Math.min(h, Math.max(...pts.map(p => p[1])));
+      return x1 - x0 < 2 || y1 - y0 < 2 ? null : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    }
+
+    // Color canvas of just the visible part of the image (as rotated / zoomed), at native resolution
+    cropCanvas(maxSide, bg) {
+      const r = this.visibleImageRect();
+      if (!r) throw new Error('Image is out of view');
+      const scale = Math.min(Math.max(1, 1 / this.zoom), maxSide / Math.max(r.w, r.h));
+      const crop = document.createElement('canvas');
+      crop.width = Math.max(1, Math.round(r.w * scale));
+      crop.height = Math.max(1, Math.round(r.h * scale));
+      // paint() centres on the viewport, so pass the viewport size and offset by the crop's corner
+      this.paint(crop.getContext('2d'), this.vp.clientWidth, this.vp.clientHeight, scale, bg, r.x, r.y);
+      return crop;
+    }
+
+    // PaddleOCR (desktop app): send the visible crop as RGBA, get text lines back
+    async runTextModel() {
+      this.infoEl.textContent = 'Reading…';
+      const crop = this.cropCanvas(2000, 'rgb(0,0,0)');
+      const d = crop.getContext('2d').getImageData(0, 0, crop.width, crop.height).data;
+      const r = await window.win.textOcr({ width: crop.width, height: crop.height, data: new Uint8Array(d.buffer) });
+      const raw = r.lines.map(l => `${l.text}  (${Math.round(l.confidence * 100)}%)`).join('\n');
+      const res = { ...this.field.parse(r.text), raw: raw || '(no text found)' };
+      // low OCR confidence on the line that produced the value → ask to verify
+      const src = r.lines.find(l => res.value && l.text.toUpperCase().replace(/[^A-Z0-9]/g, '').includes(res.value.replace(/[^A-Z0-9]/g, '')));
+      if (src && src.confidence < 0.8 && res.level === 'ok') {
+        res.level = 'warn';
+        res.status += ` · OCR ${Math.round(src.confidence * 100)}% sure — verify`;
+      }
+      return res;
+    }
+
+    // Color crop of the visible image, resized to the plate model's input, as packed RGB bytes
+    async plateInput() {
+      const spec = await getPlateSpec();
+      const crop = this.cropCanvas(3000, 'rgb(114,114,114)');
+
+      const out = document.createElement('canvas');
+      out.width = spec.width; out.height = spec.height;
+      const octx = out.getContext('2d', { willReadFrequently: true });
+      octx.imageSmoothingEnabled = true;
+      octx.imageSmoothingQuality = 'high';
+      octx.drawImage(crop, 0, 0, spec.width, spec.height);
+      const d = octx.getImageData(0, 0, spec.width, spec.height).data;
+      const gray = spec.mode !== 'rgb';
+      const px = new Uint8Array(spec.width * spec.height * (gray ? 1 : 3));
+      for (let i = 0, j = 0; i < d.length; i += 4) {
+        if (gray) px[j++] = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+        else { px[j++] = d[i]; px[j++] = d[i + 1]; px[j++] = d[i + 2]; }
+      }
+      return px;
+    }
+
+    async runPlateModel() {
+      this.infoEl.textContent = 'Reading plate…';
+      const r = await window.win.plateOcr(await this.plateInput());
+      const pct = Math.round(r.confidence * 100);
+      const region = r.region && r.region !== 'Unknown' ? ` · ${r.region}` : '';
+      const raw = `fast-plate-ocr: ${r.plate || '(nothing)'}\n` +
+        `per character: ${r.charProbs.map((p, i) => `${r.plate[i]} ${Math.round(p * 100)}%`).join(', ')}\n` +
+        (r.region ? `region: ${r.region} (${Math.round(r.regionProb * 100)}%)` : '');
+      if (!r.plate) return { value: '', status: 'No plate found — zoom in on the plate', level: 'err', raw };
+      const level = r.confidence >= 0.8 ? 'ok' : r.confidence >= 0.5 ? 'warn' : 'err';
+      const note = level === 'ok' ? '' : ' — zoom in on the plate and retry';
+      return { value: r.plate, status: `Confidence ${pct}%${region}${note}`, level, raw };
+    }
+
+    async runOcr() {
+      if (!this.img) { toast('Paste an image first'); return; }
+      if (this.busy) return;
+      const tab = currentTab; // the result belongs to this tab even if you switch while it reads
+      this.busy = true;
+      this.ocrBtn.disabled = true;
+      clearTimeout(this.infoTimer);
+      this.infoEl.textContent = 'Reading…';
+      try {
+        let res;
+        if (this.field.engine === 'plate' && window.win && window.win.plateOcr) {
+          res = await this.runPlateModel();
+        } else if (window.win && window.win.textOcr) {
+          res = await this.runTextModel();
+        } else { // plain browser: Tesseract fallback
+          const text = await recognize(this.snapshot(), this.field.whitelist, m => {
+            if (m.status === 'recognizing text') this.infoEl.textContent = `Reading ${Math.round(m.progress * 100)}%`;
+            else if (m.status) this.infoEl.textContent = m.status.replace(/^./, c => c.toUpperCase()) + '…';
+          });
+          res = { ...this.field.parse(text), raw: text.trim() };
+        }
+        if (tab !== currentTab) {
+          const st = tab.sections[this.field.key] || (tab.sections[this.field.key] = {});
+          if (res.value) st.value = res.value;
+          Object.assign(st, { statusText: res.status, level: res.level, rawText: res.raw });
+        } else {
+          this.rawText = res.raw;
+          if (res.value) this.input.value = res.value;
+          this.setStatus(res.status, res.level);
+        }
+        scheduleSave(tab);
+      } catch (err) {
+        console.error(err);
+        if (tab === currentTab) this.setStatus('OCR failed', 'err');
+        toast(this.field.engine === 'plate' && window.win ? `Plate OCR failed: ${err.message || err}` : 'OCR failed — check internet (engine loads from CDN)');
+      } finally {
+        this.busy = false;
+        this.ocrBtn.disabled = false;
+        this.infoEl.textContent = '';
+      }
+    }
+
+    // Status shows as the colored left edge of the value box; hover it for details + raw OCR text
+    setStatus(text, level) {
+      this.statusText = text;
+      this.level = level;
+      this.input.className = level || '';
+      this.input.title = text ? `${text}\n\nRaw OCR:\n${this.rawText || '(none)'}` : '';
+    }
+  }
+
+  let plateSpecPromise = null;
+  function getPlateSpec() {
+    if (!plateSpecPromise) plateSpecPromise = window.win.plateSpec();
+    return plateSpecPromise;
+  }
+
+  function setActive(s) {
+    if (active === s) return;
+    if (active) active.el.classList.remove('active');
+    active = s;
+    s.el.classList.add('active');
+  }
+
+  FIELDS.forEach((f, i) => sections.push(new Section(f, i)));
+  setActive(sections[0]);
+
+  // ---------- Global paste ----------
+  document.addEventListener('paste', e => {
+    const items = [...(e.clipboardData?.items || [])];
+    const item = items.find(i => i.type.startsWith('image/'));
+    if (!item) return; // normal text paste into inputs still works
+    e.preventDefault();
+    if (modalOpen() || !currentTab) { toast('Create a job first'); return; }
+    (active || sections[0]).loadBlob(item.getAsFile());
+  });
+
+  // ---------- Keyboard ----------
+  document.addEventListener('keydown', e => {
+    if (modalOpen()) return; // the dialog handles its own keys
+    const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
+    // Ctrl+Q: new job tab · Ctrl+Tab / Ctrl+Shift+Tab: next / previous tab · Ctrl+S: OCR selected section
+    if (ctrl && e.code === 'KeyQ') { e.preventDefault(); openNewJob(); return; }
+    if (ctrl && e.key === 'Tab') {
+      e.preventDefault();
+      if (tabs.length > 1) switchTab(tabs[(tabs.indexOf(currentTab) + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length]);
+      return;
+    }
+    if (ctrl && e.code === 'KeyS') { e.preventDefault(); if (active) active.runOcr(); return; }
+    // Ctrl+C copies the selected section's value (unless you've highlighted part of the text yourself)
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'KeyC' && active) {
+      const t = e.target;
+      const partial = t.matches('input[type=text]') ? t.selectionStart !== t.selectionEnd : !!window.getSelection().toString();
+      if (partial) return;
+      e.preventDefault();
+      if (active.input.value) copyText(active.input.value, `${active.field.title} copied`);
+      else toast(`${active.field.title} is empty`);
+      return;
+    }
+    if (e.target.matches('input[type=text]')) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (/^[1-4]$/.test(e.key)) { const s = sections[order[+e.key - 1]]; setActive(s); s.el.focus(); return; }
+    if (!active) return;
+    // A / D: rotate a few degrees (hold to keep rotating, add Shift for half-degree steps)
+    if (e.code === 'KeyA' || e.code === 'KeyD') {
+      const step = e.shiftKey ? 0.5 : 2;
+      active.rotateBy(e.code === 'KeyA' ? -step : step);
+      e.preventDefault();
+      return;
+    }
+    switch (e.key) {
+      case 'r': active.rotateBy(90); break;
+      case 'R': active.rotateBy(-90); break;
+      case '+': case '=': active.zoomAt(1.25); break;
+      case '-': case '_': active.zoomAt(0.8); break;
+      case '0': active.fit(); break;
+      case 'Enter': active.runOcr(); break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+
+  // ---------- Layout: section order + widths (both remembered) ----------
+  // Cards keep their DOM position; their grid column is set from `order`, so dragging never
+  // detaches the element being dragged. Widths belong to a section and move with it.
+  const GUTTER = 6, MIN_COL = 140; // narrowest a section can get while its label + slider still fit
+  const DEFAULT_WIDTHS = [1.4, 1, 1, 1];
+  const load = (key, valid) => {
+    try { const v = JSON.parse(localStorage.getItem(key)); return valid(v) ? v : null; } catch { return null; }
+  };
+  const save = (key, v) => { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} };
+  let widths = load('colWidths', w => Array.isArray(w) && w.length === 4 && w.every(n => typeof n === 'number' && n > 0))
+    || DEFAULT_WIDTHS.slice();
+  let order = load('order', o => Array.isArray(o) && o.length === 4 && [...o].sort().join() === '0,1,2,3')
+    || [0, 1, 2, 3];
+  const gutters = [];
+
+  function layout() {
+    order.forEach((si, pos) => { sections[si].el.style.gridColumn = String(2 * pos + 1); sections[si].el.style.gridRow = '1'; });
+    gutters.forEach((g, k) => { g.style.gridColumn = String(2 * k + 2); g.style.gridRow = '1'; });
+    grid.style.gridTemplateColumns = order.map(si => `minmax(0, ${widths[si]}fr)`).join(` ${GUTTER}px `);
+    save('colWidths', widths);
+    save('order', order);
+  }
+
+  // Drag a section by its name to move it left / right
+  sections.forEach(s => {
+    const label = s.el.querySelector('.label');
+    let drag = null;
+    label.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.stopPropagation(); // don't start panning the image
+      e.preventDefault();
+      setActive(s);
+      drag = { id: e.pointerId, x: e.clientX, moved: false };
+      label.setPointerCapture(e.pointerId);
+    });
+    label.addEventListener('pointermove', e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      if (!drag.moved) {
+        if (Math.abs(e.clientX - drag.x) < 4) return;
+        drag.moved = true;
+        s.el.classList.add('moving');
+        document.body.classList.add('reordering');
+      }
+      const si = sections.indexOf(s);
+      // swap with a neighbour once the pointer passes its centre (repeat for fast drags)
+      for (let guard = 0; guard < sections.length; guard++) {
+        const pos = order.indexOf(si);
+        const next = pos < order.length - 1 ? sections[order[pos + 1]].el.getBoundingClientRect() : null;
+        const prev = pos > 0 ? sections[order[pos - 1]].el.getBoundingClientRect() : null;
+        let to = -1;
+        if (next && e.clientX > next.left + next.width / 2) to = pos + 1;
+        else if (prev && e.clientX < prev.left + prev.width / 2) to = pos - 1;
+        if (to < 0) break;
+        order.splice(pos, 1);
+        order.splice(to, 0, si);
+        layout();
+      }
+    });
+    const end = () => {
+      if (!drag) return;
+      drag = null;
+      s.el.classList.remove('moving');
+      document.body.classList.remove('reordering');
+    };
+    label.addEventListener('pointerup', end);
+    label.addEventListener('pointercancel', end);
+    label.addEventListener('lostpointercapture', end);
+  });
+
+  // Drag the space between two sections to resize them
+  for (let k = 1; k < sections.length; k++) {
+    const g = document.createElement('div');
+    g.className = 'gutter';
+    g.title = 'Drag to resize · double-click to reset widths';
+    grid.appendChild(g);
+    gutters.push(g);
+    let start = null, left, right;
+    g.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      left = order[k - 1]; right = order[k]; // the sections currently on each side
+      const avail = grid.clientWidth - 12 - GUTTER * (sections.length - 1); // minus padding + gutters
+      const total = widths.reduce((a, b) => a + b, 0);
+      start = { x: e.clientX, l: widths[left], r: widths[right], pxPerFr: avail / total, id: e.pointerId };
+      g.setPointerCapture(e.pointerId);
+      g.classList.add('dragging');
+      document.body.classList.add('resizing');
+    });
+    g.addEventListener('pointermove', e => {
+      if (!start || e.pointerId !== start.id) return;
+      const pair = start.l + start.r, minFr = MIN_COL / start.pxPerFr;
+      let l = start.l + (e.clientX - start.x) / start.pxPerFr;
+      l = Math.max(minFr, Math.min(pair - minFr, l));
+      widths[left] = l;
+      widths[right] = pair - l;
+      layout();
+    });
+    const end = () => {
+      if (!start) return;
+      start = null;
+      g.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+    };
+    g.addEventListener('pointerup', end);
+    g.addEventListener('pointercancel', end);
+    g.addEventListener('dblclick', () => { widths = DEFAULT_WIDTHS.slice(); layout(); });
+  }
+  layout();
+
+  // ---------- Job tabs: each tab = one folder "<YYYY-MM-DD> <name>" ----------
+  const fsApi = window.win && window.win.jobCreate ? window.win : null; // null in a plain browser
+  const tabsEl = document.getElementById('tabs');
+  const modal = document.getElementById('jobModal');
+  const nameInput = document.getElementById('jobName');
+  const pathEl = document.getElementById('jobPath');
+  let tabs = [];
+  let baseDir = load('baseDir', v => typeof v === 'string' && v.length > 0);
+
+  const today = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const newTab = (name, dir, created) => ({ name, dir, created, sections: {}, imageFiles: {}, loaded: false });
+
+  function blobToImage(blob) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('bad image')); };
+      img.src = url;
+    });
+  }
+
+  function persistTabs() {
+    save('tabs', tabs.map(t => ({ name: t.name, dir: t.dir, created: t.created })));
+    save('activeTab', tabs.indexOf(currentTab));
+  }
+
+  function renderTabs() {
+    tabsEl.textContent = '';
+    tabs.forEach(t => {
+      const el = document.createElement('div');
+      el.className = 'tab' + (t === currentTab ? ' active' : '');
+      el.title = t.dir ? `${t.created} ${t.name}\n${t.dir}` : t.name;
+      el.innerHTML = '<span class="t"></span><span class="x" title="Close tab (folder is kept)">✕</span>';
+      el.querySelector('.t').textContent = t.name;
+      el.addEventListener('click', e => { if (!e.target.classList.contains('x')) switchTab(t); });
+      el.addEventListener('dblclick', e => { if (!e.target.classList.contains('x') && fsApi && t.dir) fsApi.jobOpen(t.dir); });
+      el.querySelector('.x').addEventListener('click', () => closeTab(t));
+      tabsEl.appendChild(el);
+      if (t === currentTab) requestAnimationFrame(() => el.scrollIntoView({ inline: 'nearest' }));
+    });
+  }
+
+  function syncCurrent() {
+    if (currentTab) sections.forEach(s => { currentTab.sections[s.field.key] = s.getState(); });
+  }
+
+  async function loadTab(tab) {
+    tab.loaded = true;
+    if (!fsApi || !tab.dir) return;
+    try {
+      const { session, images, exists } = await fsApi.jobLoad(tab.dir);
+      if (!exists) toast(`Folder for "${tab.name}" is missing — it will be recreated when you paste`);
+      for (const f of FIELDS) {
+        const s = (session && session.sections && session.sections[f.key]) || {};
+        let img = null;
+        if (images[f.key]) { try { img = await blobToImage(new Blob([images[f.key]])); } catch {} }
+        tab.imageFiles[f.key] = s.image || null;
+        tab.sections[f.key] = { img, rot: s.rot || 0, value: s.value || '', statusText: s.status || '', level: s.level || '', rawText: s.rawText || '' };
+      }
+    } catch (err) {
+      toast(`Couldn't load "${tab.name}": ${err.message || err}`);
+    }
+  }
+
+  async function switchTab(tab) {
+    if (!tab || tab === currentTab) return;
+    syncCurrent();
+    currentTab = tab;
+    renderTabs();
+    persistTabs();
+    if (!tab.loaded) await loadTab(tab);
+    if (currentTab !== tab) return; // switched again while loading
+    sections.forEach(s => s.setState(tab.sections[s.field.key]));
+  }
+
+  function closeTab(tab) {
+    const i = tabs.indexOf(tab);
+    if (i < 0) return;
+    if (tab === currentTab) syncCurrent();
+    flushSave(tab);
+    tabs.splice(i, 1);
+    if (tab === currentTab) {
+      currentTab = null;
+      if (tabs.length) switchTab(tabs[Math.min(i, tabs.length - 1)]);
+      else { sections.forEach(s => s.setState(null)); renderTabs(); persistTabs(); openNewJob(); }
+    } else { renderTabs(); persistTabs(); }
+  }
+
+  // --- saving ---
+  const saveTimers = new Map();
+  function scheduleSave(tab = currentTab) {
+    if (!fsApi || !tab || !tab.dir) return;
+    clearTimeout(saveTimers.get(tab));
+    saveTimers.set(tab, setTimeout(() => saveTab(tab), 400));
+  }
+  function flushSave(tab) {
+    if (!saveTimers.has(tab)) return;
+    clearTimeout(saveTimers.get(tab));
+    saveTimers.delete(tab);
+    saveTab(tab);
+  }
+  async function saveTab(tab) {
+    saveTimers.delete(tab);
+    if (!fsApi || !tab.dir) return;
+    if (tab === currentTab) syncCurrent();
+    const out = {};
+    const lines = [`Name: ${tab.name}`, `Date: ${tab.created}`, ''];
+    for (const f of FIELDS) {
+      const st = tab.sections[f.key] || {};
+      out[f.key] = { value: st.value || '', status: st.statusText || '', level: st.level || '', rawText: st.rawText || '', rot: st.rot || 0, image: tab.imageFiles[f.key] || null };
+      lines.push(`${f.title}: ${st.value || ''}`);
+    }
+    try {
+      await fsApi.jobSave(tab.dir, { name: tab.name, created: tab.created, sections: out }, lines.join('\r\n') + '\r\n');
+    } catch (err) {
+      toast(`Save failed: ${err.message || err}`);
+    }
+  }
+  async function saveImageToJob(tab, field, blob) {
+    if (!fsApi || !tab || !tab.dir) return;
+    try {
+      const ext = (blob.type.split('/')[1] || 'png').toLowerCase();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      tab.imageFiles[field.key] = await fsApi.jobSaveImage(tab.dir, field.title, bytes, ext);
+      scheduleSave(tab);
+    } catch (err) {
+      toast(`Couldn't save screenshot: ${err.message || err}`);
+    }
+  }
+  window.addEventListener('beforeunload', () => { [...saveTimers.keys()].forEach(flushSave); });
+
+  // --- "new job" dialog ---
+  const modalOpen = () => modal.classList.contains('open');
+  function showBase() {
+    const name = nameInput.value.trim();
+    if (!fsApi) { pathEl.textContent = 'Not saved (open the desktop app to save folders)'; pathEl.className = 'path missing'; return; }
+    if (!baseDir) { pathEl.textContent = 'Choose a folder first →'; pathEl.className = 'path missing'; return; }
+    pathEl.className = 'path';
+    pathEl.textContent = `‎${baseDir}\\${today()} ${name || '<name>'}`; // LRM keeps the path readable with rtl ellipsis
+  }
+  function openNewJob() {
+    nameInput.value = '';
+    document.getElementById('jobPick').style.display = fsApi ? '' : 'none';
+    document.getElementById('jobCancel').style.display = tabs.length ? '' : 'none'; // need at least one job
+    showBase();
+    modal.classList.add('open');
+    setTimeout(() => nameInput.focus(), 0);
+  }
+  function closeNewJob() { if (tabs.length) modal.classList.remove('open'); }
+  async function pickBase() {
+    const dir = await fsApi.jobPickBase(baseDir);
+    if (dir) { baseDir = dir; save('baseDir', dir); }
+    showBase();
+    nameInput.focus();
+    return dir;
+  }
+  nameInput.addEventListener('input', showBase);
+  document.getElementById('jobPick').addEventListener('click', pickBase);
+  document.getElementById('jobCancel').addEventListener('click', closeNewJob);
+  modal.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeNewJob(); } });
+  document.getElementById('jobForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); toast('Type a name for the job'); return; }
+    let dir = null;
+    if (fsApi) {
+      if (!baseDir && !(await pickBase())) return;
+      try { dir = await fsApi.jobCreate(baseDir, name, today()); }
+      catch (err) { toast(`Couldn't create folder: ${err.message || err}`); return; }
+    }
+    const tab = newTab(name, dir, today());
+    tab.loaded = true;
+    tabs.push(tab);
+    modal.classList.remove('open');
+    await switchTab(tab);
+    scheduleSave(tab); // writes values.txt + session.json right away
+    setActive(sections[order[0]]);
+    toast(dir ? `Saving to ${dir.split(/[\\/]/).pop()}` : `Created "${name}"`);
+  });
+  document.getElementById('newTab').addEventListener('click', openNewJob);
+  document.getElementById('openFolder').addEventListener('click', () => {
+    if (fsApi && currentTab && currentTab.dir) fsApi.jobOpen(currentTab.dir);
+    else toast('This job has no folder');
+  });
+  if (!fsApi) document.getElementById('openFolder').style.display = 'none';
+
+  // --- restore tabs from last time ---
+  (load('tabs', v => Array.isArray(v)) || []).forEach(t => {
+    if (t && typeof t.name === 'string') tabs.push(newTab(t.name, t.dir || null, t.created || today()));
+  });
+  if (tabs.length) {
+    const i = load('activeTab', v => Number.isInteger(v)) || 0;
+    switchTab(tabs[Math.max(0, Math.min(i, tabs.length - 1))]);
+  } else {
+    renderTabs();
+    openNewJob();
+  }
+
+  // ---------- Title bar ----------
+  const autoBtn = document.getElementById('autoOcr');
+  autoBtn.addEventListener('click', () => { autoOcr = !autoOcr; autoBtn.classList.toggle('on', autoOcr); });
+  document.getElementById('copyAll').addEventListener('click', () =>
+    copyText(sections.map(s => `${s.field.title}: ${s.input.value}`).join('\n'), 'All fields copied'));
+  document.getElementById('clearAll').addEventListener('click', () => sections.forEach(s => s.clear()));
+  document.getElementById('help').addEventListener('click', () =>
+    toast('Ctrl+V paste · Ctrl+S OCR · Ctrl+C copy · A/D rotate · Ctrl+Q new job · Ctrl+Tab next job'));
+
+  if (window.win) {
+    document.body.classList.add('electron');
+    document.getElementById('min').addEventListener('click', () => window.win.minimize());
+    document.getElementById('close').addEventListener('click', () => window.win.close());
+    const pin = document.getElementById('pin');
+    pin.addEventListener('click', async () => pin.classList.toggle('on', await window.win.toggleTop()));
+  }
+
+  // ---------- Utils ----------
+  let toastTimer;
+  function toast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+  }
+  async function copyText(txt, msg) {
+    try { await navigator.clipboard.writeText(txt); toast(msg); }
+    catch { toast('Copy failed'); }
+  }
+
+  // Warm up the OCR engine so the first read is fast
+  setTimeout(() => getWorker().catch(() => {}), 300);
+})();
+</script>
+</body>
+</html>
