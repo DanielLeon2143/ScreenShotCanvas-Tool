@@ -41,7 +41,15 @@ All OCR runs locally with ONNX Runtime, so it works offline once installed.
 | R / Shift+R | Rotate ±90° |
 | + / − / 0 | Zoom in / out / fit |
 
-## Install and run
+## Download (Windows)
+
+Grab `ScreenShotCanvas-Tool-…-win-x64.zip` from the
+[latest release](https://github.com/DanielLeon2143/ScreenShotCanvas-Tool/releases/latest), unzip it
+anywhere, and run `ScreenShotCanvas Tool.exe`. No install or Node.js needed.
+
+The exe isn't code-signed, so Windows SmartScreen may warn the first time. Click **More info → Run anyway**.
+
+## Run from source
 
 Requires [Node.js](https://nodejs.org/) 18 or newer (Windows is the tested platform).
 
@@ -57,6 +65,8 @@ On Windows you can also double-click `Start.vbs` to launch it without a console 
 > With npm 11+, install scripts may be blocked. If Electron fails to start, run
 > `npm install-scripts approve electron` (or `npm rebuild electron`).
 
+To build the Windows release yourself, run `npm run dist`. The app is written to `dist/`.
+
 ## Project layout
 
 ```
@@ -67,6 +77,7 @@ text-ocr.js    PaddleOCR detection + recognition pipeline (onnxruntime-node)
 plate-ocr.js   fast-plate-ocr plate recognizer
 jobs.js        Job folders: create, save images/values, load
 models/        ONNX models (plate model + PaddleOCR det/rec)
+build.js       Packages the portable Windows build (npm run dist)
 ```
 
 ## Credits

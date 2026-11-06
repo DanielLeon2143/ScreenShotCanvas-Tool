@@ -3,7 +3,8 @@
 const path = require('path');
 const ort = require('onnxruntime-node');
 
-const MODEL_DIR = path.join(__dirname, 'models');
+// in a packaged build the models live outside app.asar (native code can't read inside it)
+const MODEL_DIR = path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), 'models');
 const config = require(path.join(MODEL_DIR, 'plate_config.json'));
 
 let sessionPromise = null;

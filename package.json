@@ -5,9 +5,11 @@
   "description": "Borderless screenshot OCR strip for VIN, plate, expiration and mileage",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "node build.js"
   },
   "devDependencies": {
+    "@electron/packager": "^18.4.4",
     "electron": "^33.4.11"
   },
   "allowScripts": {
@@ -15,5 +17,6 @@
   },
   "dependencies": {
     "onnxruntime-node": "^1.20.1"
-  }
+  },
+  "productName": "ScreenShotCanvas Tool"
 }

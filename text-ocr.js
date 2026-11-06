@@ -7,7 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const ort = require('onnxruntime-node');
 
-const DIR = path.join(__dirname, 'models', 'paddle');
+// in a packaged build the models live outside app.asar (native code can't read inside it)
+const DIR = path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), 'models', 'paddle');
 const DET_LIMIT_MIN = 736;   // short side is scaled up to at least this for detection
 const DET_MAX_SIDE = 2000;   // ...and the long side capped to this
 const DET_THRESH = 0.3;      // pixel probability to count as text
