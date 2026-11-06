@@ -21,7 +21,7 @@ function sessions() {
   if (!detP) {
     detP = ort.InferenceSession.create(path.join(DIR, 'det.onnx'));
     recP = ort.InferenceSession.create(path.join(DIR, 'rec.onnx'));
-    const list = fs.readFileSync(path.join(DIR, 'rec_keys.txt'), 'utf8').split('\n');
+    const list = fs.readFileSync(path.join(DIR, 'rec_keys.txt'), 'utf8').split(/\r?\n/);
     if (list[list.length - 1] === '') list.pop();
     keys = ['', ...list, ' '];                       // index 0 = CTC blank, last = space
     // The model also knows ~6000 CJK characters; only allow printable ASCII in our results

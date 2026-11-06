@@ -1,0 +1,2 @@
+*.onnx binary
+models/paddle/rec_keys.txt -text
